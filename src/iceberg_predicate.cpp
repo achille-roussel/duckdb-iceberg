@@ -3,6 +3,8 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
@@ -72,6 +74,9 @@ static bool MatchBoundsConstant(const Value &constant, ExpressionType comparison
 		return TRANSFORM::CompareLessThan(constant_value, stats);
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
 		return TRANSFORM::CompareLessThanOrEqual(constant_value, stats);
+	case ExpressionType::COMPARE_NOTEQUAL:
+		//! Can only prune if entire file contains exactly this value (lower == upper == value)
+		return !(constant_value == stats.lower_bound && constant_value == stats.upper_bound);
 	default:
 		//! Conservative approach: we don't know, so we just say it's not filtered out
 		return true;
@@ -149,6 +154,16 @@ bool MatchBoundsTemplated(ClientContext &context, const TableFilter &filter, con
 		auto &conjunction_and_filter = filter.Cast<ConjunctionAndFilter>();
 		return MatchBoundsConjunctionAndFilter<TRANSFORM>(context, conjunction_and_filter, stats, transform);
 	}
+	case TableFilterType::CONJUNCTION_OR: {
+		auto &conjunction_or_filter = filter.Cast<ConjunctionOrFilter>();
+		//! For OR: file matches if ANY child filter matches
+		for (auto &child : conjunction_or_filter.child_filters) {
+			if (MatchBoundsTemplated<TRANSFORM>(context, *child, stats, transform)) {
+				return true;
+			}
+		}
+		return false;
+	}
 	case TableFilterType::IS_NULL: {
 		//! FIXME: these are never hit, because it goes through ExpressionFilter instead?
 		return MatchBoundsIsNullFilter<TRANSFORM>(stats, transform);
@@ -203,11 +218,41 @@ bool MatchBoundsTemplated(ClientContext &context, const TableFilter &filter, con
 			D_ASSERT(expr.type == ExpressionType::OPERATOR_IS_NOT_NULL);
 			return MatchBoundsIsNotNullFilter<TRANSFORM>(stats, transform);
 		}
+		case ExpressionType::COMPARE_BETWEEN: {
+			D_ASSERT(expr.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN);
+			auto &between_expr = expr.Cast<BoundBetweenExpression>();
+
+			//! Input must be a column reference
+			if (between_expr.input->type != ExpressionType::BOUND_REF) {
+				return true;
+			}
+
+			//! Both bounds must be foldable (constants)
+			if (!between_expr.lower->IsFoldable() || !between_expr.upper->IsFoldable()) {
+				return true;
+			}
+
+			Value lower_val, upper_val;
+			if (!ExpressionExecutor::TryEvaluateScalar(context, *between_expr.lower, lower_val) ||
+			    !ExpressionExecutor::TryEvaluateScalar(context, *between_expr.upper, upper_val)) {
+				return true;
+			}
+
+			//! File matches if ranges overlap: file.lower <= query.upper AND file.upper >= query.lower
+			auto lower_cmp = between_expr.lower_inclusive ? ExpressionType::COMPARE_GREATERTHANOREQUALTO
+			                                              : ExpressionType::COMPARE_GREATERTHAN;
+			auto upper_cmp = between_expr.upper_inclusive ? ExpressionType::COMPARE_LESSTHANOREQUALTO
+			                                              : ExpressionType::COMPARE_LESSTHAN;
+
+			return MatchBoundsConstant<TRANSFORM>(lower_val, lower_cmp, stats, transform) &&
+			       MatchBoundsConstant<TRANSFORM>(upper_val, upper_cmp, stats, transform);
+		}
 		case ExpressionType::COMPARE_GREATERTHAN:
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
 		case ExpressionType::COMPARE_LESSTHAN:
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		case ExpressionType::COMPARE_EQUAL: {
+		case ExpressionType::COMPARE_EQUAL:
+		case ExpressionType::COMPARE_NOTEQUAL: {
 			D_ASSERT(expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON);
 			auto &compare_expr = expr.Cast<BoundComparisonExpression>();
 			if (transform.Type() == IcebergTransformType::IDENTITY) {
@@ -229,6 +274,92 @@ bool MatchBoundsTemplated(ClientContext &context, const TableFilter &filter, con
 				}
 				return true;
 			}
+		}
+		case ExpressionType::BOUND_FUNCTION: {
+			//! Handle prefix/starts_with functions for LIKE 'prefix%' optimization
+			auto &func_expr = expr.Cast<BoundFunctionExpression>();
+
+			if (func_expr.function.name == "prefix" || func_expr.function.name == "starts_with") {
+				if (func_expr.children.size() != 2) {
+					return true;
+				}
+
+				//! First child should be column reference
+				if (func_expr.children[0]->type != ExpressionType::BOUND_REF) {
+					return true;
+				}
+
+				//! Second child should be constant prefix string
+				if (!func_expr.children[1]->IsFoldable()) {
+					return true;
+				}
+
+				Value prefix_val;
+				if (!ExpressionExecutor::TryEvaluateScalar(context, *func_expr.children[1], prefix_val)) {
+					return true;
+				}
+
+				if (prefix_val.IsNull() || stats.BoundsAreNull() ||
+				    !stats.has_upper_bounds || !stats.has_lower_bounds) {
+					return true;
+				}
+
+				auto prefix_str = prefix_val.ToString();
+				if (prefix_str.empty()) {
+					return true;
+				}
+
+				auto lower_str = stats.lower_bound.ToString();
+				auto upper_str = stats.upper_bound.ToString();
+
+				//! Prune if upper_bound < prefix (no strings can start with prefix)
+				if (upper_str < prefix_str) {
+					return false;
+				}
+
+				//! Calculate next_prefix (increment last char)
+				string next_prefix = prefix_str;
+				next_prefix.back()++;
+
+				//! Prune if lower_bound >= next_prefix
+				if (lower_str >= next_prefix) {
+					return false;
+				}
+
+				return true;
+			}
+			return true;
+		}
+		case ExpressionType::COMPARE_NOT_IN: {
+			//! NOT IN can only prune if file has single value that's in the exclusion list
+			D_ASSERT(expr.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR);
+			auto &operator_expr = expr.Cast<BoundOperatorExpression>();
+
+			if (operator_expr.children.empty()) {
+				return true;
+			}
+
+			//! First child should be column reference
+			if (operator_expr.children[0]->type != ExpressionType::BOUND_REF) {
+				return true;
+			}
+
+			//! Can only prune if file has single value (lower == upper)
+			if (stats.lower_bound != stats.upper_bound) {
+				return true;
+			}
+
+			//! Check if the single value is in the exclusion list
+			for (size_t i = 1; i < operator_expr.children.size(); i++) {
+				Value child_val;
+				if (!ExpressionExecutor::TryEvaluateScalar(context, *operator_expr.children[i], child_val)) {
+					return true;
+				}
+				if (stats.lower_bound == child_val) {
+					return false; //! Can prune: only value in file is excluded
+				}
+			}
+			return true;
 		}
 		default:
 			return true;
