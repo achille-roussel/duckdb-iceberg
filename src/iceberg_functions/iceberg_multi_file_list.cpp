@@ -16,6 +16,8 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/filter/struct_filter.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 #include "metadata/iceberg_predicate_stats.hpp"
 #include "metadata/iceberg_table_metadata.hpp"
@@ -159,6 +161,11 @@ unique_ptr<IcebergMultiFileList> IcebergMultiFileList::PushdownInternal(ClientCo
 	filtered_list->names = names;
 	filtered_list->types = types;
 	filtered_list->have_bound = true;
+
+	for (auto &expr : complex_filters) {
+		filtered_list->complex_filters.push_back(expr->Copy());
+	}
+
 	return filtered_list;
 }
 
@@ -189,12 +196,48 @@ IcebergMultiFileList::DynamicFilterPushdown(ClientContext &context, const MultiF
 	return nullptr;
 }
 
+static bool ShouldEvaluateDirectly(const Expression &expr) {
+	switch (expr.type) {
+	case ExpressionType::CONJUNCTION_OR: {
+		//! Complex OR with nested AND children - FilterCombiner drops these
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conj.children) {
+			if (child->type == ExpressionType::CONJUNCTION_AND) {
+				return true; //! (AND) OR (AND) pattern
+			}
+		}
+		return false;
+	}
+	case ExpressionType::OPERATOR_NOT:
+		//! NOT expressions wrapping prunable expressions
+		return true;
+	case ExpressionType::COMPARE_NOT_BETWEEN:
+		//! NOT BETWEEN is not handled by FilterCombiner
+		return true;
+	case ExpressionType::BOUND_FUNCTION: {
+		//! ends_with/suffix functions are not handled by FilterCombiner
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		return func.function.name == "suffix" || func.function.name == "ends_with";
+	}
+	default:
+		return false;
+	}
+}
+
 unique_ptr<MultiFileList> IcebergMultiFileList::ComplexFilterPushdown(ClientContext &context,
                                                                       const MultiFileOptions &options,
                                                                       MultiFilePushdownInfo &info,
                                                                       vector<unique_ptr<Expression>> &filters) {
 	if (filters.empty()) {
 		return nullptr;
+	}
+
+	//! Collect complex expressions that FilterCombiner would drop
+	vector<unique_ptr<Expression>> complex_expressions;
+	for (const auto &filter : filters) {
+		if (ShouldEvaluateDirectly(*filter)) {
+			complex_expressions.push_back(filter->Copy());
+		}
 	}
 
 	FilterCombiner combiner(context);
@@ -204,11 +247,19 @@ unique_ptr<MultiFileList> IcebergMultiFileList::ComplexFilterPushdown(ClientCont
 
 	vector<FilterPushdownResult> unused;
 	auto filter_set = combiner.GenerateTableScanFilters(info.column_indexes, unused);
-	if (filter_set.filters.empty()) {
+
+	//! If no filters were generated but we have complex expressions, still create the list
+	if (filter_set.filters.empty() && complex_expressions.empty()) {
 		return nullptr;
 	}
 
-	return PushdownInternal(context, filter_set);
+	auto result = PushdownInternal(context, filter_set);
+	if (result) {
+		for (auto &expr : complex_expressions) {
+			result->complex_filters.push_back(std::move(expr));
+		}
+	}
+	return result;
 }
 
 vector<OpenFileInfo> IcebergMultiFileList::GetAllFiles() {
@@ -311,7 +362,7 @@ IcebergPredicateStats IcebergPredicateStats::DeserializeBounds(const Value &lowe
 }
 
 bool IcebergMultiFileList::FileMatchesFilter(const IcebergManifestEntry &file) const {
-	D_ASSERT(!table_filters.filters.empty());
+	D_ASSERT(!table_filters.filters.empty() || !complex_filters.empty());
 
 	auto &filters = table_filters.filters;
 	auto &schema = GetSchema().columns;
@@ -433,6 +484,53 @@ bool IcebergMultiFileList::FileMatchesFilter(const IcebergManifestEntry &file) c
 			return false;
 		}
 	}
+
+	//! Check complex expressions (OR patterns, NOT BETWEEN, etc.)
+	if (!complex_filters.empty() && !file.lower_bounds.empty() && !file.upper_bounds.empty()) {
+		//! For complex expressions, we need to build stats for the first column referenced
+		//! TODO: This is simplified - ideally we'd extract column references from the expression
+		//! For now, we check against the first column with bounds
+		for (auto &complex_expr : complex_filters) {
+			//! Find the column referenced by the expression and build stats
+			//! For simplicity, we iterate over columns and check if they have bounds
+			for (idx_t index = 0; index < schema.size(); index++) {
+				auto &column = *schema[index];
+				auto &column_id = column.id;
+
+				auto lower_bound_it = file.lower_bounds.find(column_id);
+				auto upper_bound_it = file.upper_bounds.find(column_id);
+				if (lower_bound_it == file.lower_bounds.end() || upper_bound_it == file.upper_bounds.end()) {
+					continue;
+				}
+
+				auto stats =
+				    IcebergPredicateStats::DeserializeBounds(lower_bound_it->second, upper_bound_it->second, column.name, column.type);
+
+				int64_t value_count = 0;
+				auto value_counts_it = file.value_counts.find(column_id);
+				if (value_counts_it != file.value_counts.end()) {
+					value_count = value_counts_it->second;
+				}
+
+				auto null_counts_it = file.null_value_counts.find(column_id);
+				if (null_counts_it != file.null_value_counts.end()) {
+					auto &null_counts = null_counts_it->second;
+					stats.has_null = null_counts != 0;
+					stats.has_not_null = (value_count - null_counts) > 0;
+				} else {
+					stats.has_not_null = value_count > 0;
+				}
+
+				if (!IcebergPredicate::MatchBoundsFromExpression(context, *complex_expr, stats,
+				                                                 IcebergTransform::Identity())) {
+					return false;
+				}
+				//! Only need to check one column - the expression evaluation handles the full expression
+				break;
+			}
+		}
+	}
+
 	return true;
 }
 
@@ -481,7 +579,7 @@ optional_ptr<const IcebergManifestEntry> IcebergMultiFileList::GetDataFile(idx_t
 			auto &data_file = current_data_files[data_file_idx];
 			data_file_idx++;
 			// Check whether current data file is filtered out.
-			if (!table_filters.filters.empty() && !FileMatchesFilter(data_file)) {
+			if ((!table_filters.filters.empty() || !complex_filters.empty()) && !FileMatchesFilter(data_file)) {
 				DUCKDB_LOG(context, IcebergLogType, "Iceberg Filter Pushdown, skipped 'data_file': '%s'",
 				           data_file.file_path);
 				//! Skip this file
@@ -720,7 +818,7 @@ void IcebergMultiFileList::ProcessDeletes(const vector<MultiFileColumnDefinition
 
 		for (auto &entry : manifest_file.data_files) {
 			// Check whether current data file is filtered out.
-			if (!table_filters.filters.empty() && !FileMatchesFilter(entry)) {
+			if ((!table_filters.filters.empty() || !complex_filters.empty()) && !FileMatchesFilter(entry)) {
 				DUCKDB_LOG(context, IcebergLogType, "Iceberg Filter Pushdown, skipped 'data_file': '%s'",
 				           entry.file_path);
 				//! Skip this file

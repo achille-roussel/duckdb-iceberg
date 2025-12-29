@@ -21,6 +21,7 @@
 #include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/planner/expression.hpp"
 
 #include "deletes/equality_delete.hpp"
 #include "deletes/positional_delete.hpp"
@@ -99,6 +100,9 @@ public:
 	vector<string> names;
 	vector<LogicalType> types;
 	TableFilterSet table_filters;
+	//! Complex expressions that FilterCombiner drops (e.g., complex OR patterns, NOT BETWEEN)
+	//! These are evaluated directly using IcebergPredicate::MatchBoundsFromExpression
+	vector<unique_ptr<Expression>> complex_filters;
 
 	unique_ptr<manifest_file::ManifestFileReader> data_manifest_reader;
 	unique_ptr<manifest_file::ManifestFileReader> delete_manifest_reader;

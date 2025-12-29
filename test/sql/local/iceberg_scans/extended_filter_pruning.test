@@ -200,3 +200,66 @@ query I
 select count(*) from my_datalake.default.filtering_on_bounds where col1 >= 2000 AND col1 <= 3000;
 ----
 1001
+
+# =============================================================================
+# TEST: Complex nested OR with AND children
+# (col1 >= 0 AND col1 < 500) OR (col1 >= 4500 AND col1 < 5000)
+# Should match first 500 + last 500 = 1000 rows
+# This pattern was previously not pushed down by FilterCombiner
+# =============================================================================
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+select count(*) from my_datalake.default.filtering_on_bounds
+where (col1 >= 0 AND col1 < 500) OR (col1 >= 4500 AND col1 < 5000);
+----
+1000
+
+# =============================================================================
+# TEST: NOT BETWEEN - correctness test
+# NOT BETWEEN 1000 AND 3999 should return values 0-999 and 4000-4999
+# =============================================================================
+
+query I
+select count(*) from my_datalake.default.filtering_on_bounds
+where col1 NOT BETWEEN 1000 AND 3999;
+----
+2000
+
+# Verify we get the expected range
+query II
+select min(col1), max(col1) from my_datalake.default.filtering_on_bounds
+where col1 NOT BETWEEN 1000 AND 3999;
+----
+0	4999
+
+# =============================================================================
+# TEST: NOT with comparison - correctness test
+# NOT (col1 >= 2000) should return values 0-1999
+# =============================================================================
+
+query I
+select count(*) from my_datalake.default.filtering_on_bounds
+where NOT (col1 >= 2000);
+----
+2000
+
+# Verify we get the expected range
+query II
+select min(col1), max(col1) from my_datalake.default.filtering_on_bounds
+where NOT (col1 >= 2000);
+----
+0	1999
+
+# =============================================================================
+# TEST: Complex OR with three branches
+# col1 < 100 OR (col1 >= 2000 AND col1 < 2100) OR col1 >= 4900
+# =============================================================================
+
+query I
+select count(*) from my_datalake.default.filtering_on_bounds
+where col1 < 100 OR (col1 >= 2000 AND col1 < 2100) OR col1 >= 4900;
+----
+300
