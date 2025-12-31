@@ -38,7 +38,15 @@ unique_ptr<IcebergTable> IcebergTable::Load(const string &iceberg_path, const Ic
 	for (auto &manifest : manifest_list_entries) {
 		auto full_path = options.allow_moved_paths ? IcebergUtils::GetFullPath(iceberg_path, manifest.manifest_path, fs)
 		                                           : manifest.manifest_path;
-		auto scan = make_uniq<AvroScan>("IcebergManifest", context, full_path);
+
+		OpenFileInfo file_info(full_path);
+		if (manifest.manifest_length > 0) {
+			file_info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+			file_info.extended_info->options["file_size"] = Value::UBIGINT(manifest.manifest_length);
+			file_info.extended_info->options["etag"] = Value("");
+			file_info.extended_info->options["last_modified"] = Value::TIMESTAMP(timestamp_t(0));
+		}
+		auto scan = make_uniq<AvroScan>("IcebergManifest", context, file_info);
 
 		manifest_file_reader->Initialize(std::move(scan));
 		manifest_file_reader->SetSequenceNumber(manifest.sequence_number);
