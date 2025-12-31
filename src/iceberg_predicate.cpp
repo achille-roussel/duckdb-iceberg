@@ -671,12 +671,13 @@ static bool MatchBoundsFromExpressionTemplated(ClientContext &context, const Exp
 		return true;
 	}
 	case ExpressionType::OPERATOR_NOT: {
-		//! NOT inverts the result of child expression
-		auto &op = expr.Cast<BoundOperatorExpression>();
-		if (op.children.size() != 1) {
-			return true;
-		}
-		return !MatchBoundsFromExpressionTemplated<TRANSFORM>(context, *op.children[0], stats, transform);
+		//! NOT expressions cannot be pruned with simple inversion.
+		//! MatchBounds returns true="might match some rows" or false="definitely no rows match".
+		//! For NOT expr:
+		//!   - If child returns true (some rows might match expr), file might also have rows NOT matching expr
+		//!   - If child returns false (no rows match expr), ALL rows match NOT expr
+		//! In both cases we cannot prune, so always return true (conservative).
+		return true;
 	}
 
 	//! === COMPARISON OPERATORS ===
