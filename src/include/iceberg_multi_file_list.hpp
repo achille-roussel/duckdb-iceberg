@@ -22,6 +22,7 @@
 #include "duckdb/planner/filter/null_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 
 #include "deletes/equality_delete.hpp"
 #include "deletes/positional_delete.hpp"
@@ -80,6 +81,7 @@ protected:
 	bool FileMatchesFilter(const IcebergManifestEntry &file) const;
 	// TODO: How to guarantee we only call this after the filter pushdown?
 	void InitializeFiles(lock_guard<mutex> &guard);
+	void LoadManifests(lock_guard<mutex> &guard);
 
 	//! NOTE: this requires the lock because it modifies the 'data_files' vector, potentially invalidating references
 	optional_ptr<const IcebergManifestEntry> GetDataFile(idx_t file_id, lock_guard<mutex> &guard);
@@ -110,6 +112,7 @@ public:
 	vector<IcebergManifestEntry> data_files;
 	vector<IcebergManifestListEntry> data_manifests;
 	vector<IcebergManifestListEntry> delete_manifests;
+
 	vector<reference<IcebergManifestFile>> transaction_data_manifests;
 	vector<reference<IcebergManifestFile>> transaction_delete_manifests;
 	idx_t transaction_data_idx = 0;
