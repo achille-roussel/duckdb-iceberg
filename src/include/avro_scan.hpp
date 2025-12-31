@@ -9,6 +9,7 @@
 
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -19,6 +20,7 @@ namespace duckdb {
 class AvroScan {
 public:
 	AvroScan(const string &scan_name, ClientContext &context, const string &path);
+	AvroScan(const string &scan_name, ClientContext &context, const OpenFileInfo &file_info);
 
 public:
 	bool GetNext(DataChunk &chunk);
@@ -26,7 +28,7 @@ public:
 	bool Finished() const;
 
 public:
-	string path;
+	OpenFileInfo file_info;
 	optional_ptr<TableFunction> avro_scan;
 	ClientContext &context;
 	unique_ptr<FunctionData> bind_data;
