@@ -132,6 +132,7 @@ public:
 	mutable mutex delete_lock;
 
 	bool initialized = false;
+	bool manifests_loaded = false;
 	const IcebergOptions &options;
 };
 

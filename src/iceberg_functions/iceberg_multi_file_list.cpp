@@ -316,6 +316,14 @@ vector<OpenFileInfo> IcebergMultiFileList::GetAllFiles() {
 	vector<OpenFileInfo> file_list;
 	//! Lock is required because it reads the 'data_files' vector
 	lock_guard<mutex> guard(lock);
+	//! Ensure files are initialized and manifests are loaded
+	if (!initialized) {
+		InitializeFiles(guard);
+	}
+	if (!manifests_loaded) {
+		LoadManifests(guard);
+		manifests_loaded = true;
+	}
 	for (idx_t i = 0; i < data_files.size(); i++) {
 		file_list.push_back(GetFileInternal(i, guard));
 	}
@@ -585,6 +593,10 @@ bool IcebergMultiFileList::FileMatchesFilter(const IcebergManifestEntry &file) c
 }
 
 optional_ptr<const IcebergManifestEntry> IcebergMultiFileList::GetDataFile(idx_t file_id, lock_guard<mutex> &guard) {
+	if (!manifests_loaded) {
+		LoadManifests(guard);
+		manifests_loaded = true;
+	}
 	if (file_id >= data_files.size()) {
 		return nullptr;
 	}
@@ -826,8 +838,6 @@ void IcebergMultiFileList::InitializeFiles(lock_guard<mutex> &guard) {
 	current_data_manifest = data_manifests.begin();
 	current_delete_manifest = delete_manifests.begin();
 	current_transaction_delete_manifest = transaction_delete_manifests.begin();
-
-	LoadManifests(guard);
 }
 
 void IcebergMultiFileList::ProcessDeletes(const vector<MultiFileColumnDefinition> &global_columns,
