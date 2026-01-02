@@ -8,7 +8,7 @@ unique_ptr<MultiFileReader> IcebergAvroMultiFileReader::CreateInstance(const Tab
 	// Extract file_infos from function_info if available
 	if (table.function_info) {
 		auto &info = table.function_info->Cast<IcebergAvroScanInfo>();
-		reader->file_infos = info.files;  // Copy, not move - CreateInstance may be called multiple times
+		reader->file_infos = info.files; // Copy, not move - CreateInstance may be called multiple times
 	}
 	return reader;
 }

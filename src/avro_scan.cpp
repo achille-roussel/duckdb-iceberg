@@ -41,8 +41,7 @@ AvroScan::AvroScan(const string &scan_name, ClientContext &context, const OpenFi
 	dummy_table_function.name = scan_name;
 	dummy_table_function.get_multi_file_reader = IcebergAvroMultiFileReader::CreateInstance;
 	// Pass the OpenFileInfo via function_info - CreateInstance will extract it
-	dummy_table_function.function_info =
-	    make_shared_ptr<IcebergAvroScanInfo>(vector<OpenFileInfo> {this->file_info});
+	dummy_table_function.function_info = make_shared_ptr<IcebergAvroScanInfo>(vector<OpenFileInfo> {this->file_info});
 	TableFunctionBindInput bind_input(children, named_params, input_types, input_names, nullptr, nullptr,
 	                                  dummy_table_function, empty);
 	bind_data = avro_scan->bind(context, bind_input, return_types, return_names);

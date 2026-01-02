@@ -300,8 +300,8 @@ bool MatchBoundsTemplated(ClientContext &context, const TableFilter &filter, con
 					return true;
 				}
 
-				if (prefix_val.IsNull() || stats.BoundsAreNull() ||
-				    !stats.has_upper_bounds || !stats.has_lower_bounds) {
+				if (prefix_val.IsNull() || stats.BoundsAreNull() || !stats.has_upper_bounds ||
+				    !stats.has_lower_bounds) {
 					return true;
 				}
 
@@ -434,8 +434,8 @@ static bool MatchComparisonExpression(ClientContext &context, const Expression &
 
 //! Helper: Match BETWEEN expression
 template <class TRANSFORM>
-static bool MatchBetweenExpression(ClientContext &context, const Expression &expr,
-                                   const IcebergPredicateStats &stats, const IcebergTransform &transform) {
+static bool MatchBetweenExpression(ClientContext &context, const Expression &expr, const IcebergPredicateStats &stats,
+                                   const IcebergTransform &transform) {
 	D_ASSERT(expr.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN);
 	auto &between_expr = expr.Cast<BoundBetweenExpression>();
 
@@ -458,8 +458,8 @@ static bool MatchBetweenExpression(ClientContext &context, const Expression &exp
 	//! File matches if ranges overlap: file.lower <= query.upper AND file.upper >= query.lower
 	auto lower_cmp = between_expr.lower_inclusive ? ExpressionType::COMPARE_GREATERTHANOREQUALTO
 	                                              : ExpressionType::COMPARE_GREATERTHAN;
-	auto upper_cmp = between_expr.upper_inclusive ? ExpressionType::COMPARE_LESSTHANOREQUALTO
-	                                              : ExpressionType::COMPARE_LESSTHAN;
+	auto upper_cmp =
+	    between_expr.upper_inclusive ? ExpressionType::COMPARE_LESSTHANOREQUALTO : ExpressionType::COMPARE_LESSTHAN;
 
 	return MatchBoundsConstant<TRANSFORM>(lower_val, lower_cmp, stats, transform) &&
 	       MatchBoundsConstant<TRANSFORM>(upper_val, upper_cmp, stats, transform);

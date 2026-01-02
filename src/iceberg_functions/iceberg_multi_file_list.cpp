@@ -42,9 +42,8 @@ public:
 		auto &task_context = *conn.context;
 
 		auto &fs = FileSystem::GetFileSystem(task_context);
-		auto full_path = options.allow_moved_paths
-		                     ? IcebergUtils::GetFullPath(iceberg_path, manifest.manifest_path, fs)
-		                     : manifest.manifest_path;
+		auto full_path = options.allow_moved_paths ? IcebergUtils::GetFullPath(iceberg_path, manifest.manifest_path, fs)
+		                                           : manifest.manifest_path;
 
 		OpenFileInfo file_info(full_path);
 		if (manifest.manifest_length > 0) {
@@ -561,8 +560,8 @@ bool IcebergMultiFileList::FileMatchesFilter(const IcebergManifestEntry &file) c
 					continue;
 				}
 
-				auto stats =
-				    IcebergPredicateStats::DeserializeBounds(lower_bound_it->second, upper_bound_it->second, column.name, column.type);
+				auto stats = IcebergPredicateStats::DeserializeBounds(lower_bound_it->second, upper_bound_it->second,
+				                                                      column.name, column.type);
 
 				int64_t value_count = 0;
 				auto value_counts_it = file.value_counts.find(column_id);
