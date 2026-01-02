@@ -38,7 +38,9 @@ public:
 
 	void ExecuteTask() override {
 		// Each parallel task needs its own ClientContext because ClientContext is not thread-safe.
+		// We also need to begin a transaction to access secrets for S3 authentication.
 		Connection conn(db);
+		conn.BeginTransaction();
 		auto &task_context = *conn.context;
 
 		auto &fs = FileSystem::GetFileSystem(task_context);
